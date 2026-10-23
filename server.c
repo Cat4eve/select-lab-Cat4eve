@@ -13,6 +13,7 @@
 #define PORT 12345
 #define MAX_CLIENTS  FD_SETSIZE  // or define your own limit
 #define BUFFER_SIZE 1024
+#define XOR_KEY 42
 
 /*
  * Explanation:
@@ -36,12 +37,13 @@ static void on_sigint(int signum)
     int saved_errno = errno;
     (void)signum;
 
-    /* DRAGON #4 TODO:
-     * 1. Set stop_requested.
-     * 2. Close the listening socket (if it is open), and mark it closed.
-     *    Why might closing it help if SIGINT arrives just BEFORE select()?
-     * 3. Do not use printf() here.
-     */
+    stop_requested = 1;
+
+    if (listening_fd >= 0) {
+        int fd = listening_fd;
+        listening_fd = -1;
+        close(fd);
+    }
 
     errno = saved_errno;
 }
@@ -58,10 +60,18 @@ int main(void)
     /* DRAGON #4 TODO: Register on_sigint as the handler for SIGINT.
      * Hint: look at signal(SIGINT, ...) in last week's server.c.
      */
+struct sigaction sa = {0};
+sa.sa_handler = on_sigint;
+sigemptyset(&sa.sa_mask);
+
+if (sigaction(SIGINT, &sa, NULL) == -1) {
+    perror("sigaction");
+    return EXIT_FAILURE;
+}
 
     // 1. Create the listening socket
     // DRAGON #1 - 111 on the next line won't work. What number to use for TCP?
-    listen_fd = socket(AF_INET, SOCK_STREAM, 111);
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         perror("socket");
         exit(EXIT_FAILURE);
@@ -72,7 +82,7 @@ int main(void)
     server_addr.sin_family      = AF_INET;
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     // DRAGON #2 - the following string won't work. It won't listen on the port you want.  Fix it.
-    server_addr.sin_port        = PORT;
+    server_addr.sin_port        = htons(PORT);
 
     if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("bind");
@@ -101,11 +111,15 @@ int main(void)
 
     // 4. Server loop
     // DRAGON #4 TODO: Stop this loop when SIGINT requests shutdown.
-    while (1) {
-        FD_ZERO(&read_fds);
-        FD_SET(listen_fd, &read_fds);
-        max_fd = listen_fd;
+    while (!stop_requested) {
+FD_ZERO(&read_fds);
 
+if (stop_requested) {
+    break;
+}
+
+FD_SET(listen_fd, &read_fds);
+max_fd = listen_fd;
         // Add client sockets to set
         for (i = 0; i < MAX_CLIENTS; i++) {
             int sd = client_sockets[i];
@@ -119,25 +133,26 @@ int main(void)
 
         // 5. Use select() to monitor sockets
         int activity = select(max_fd + 1, &read_fds, NULL, NULL, NULL); // This is select!
-        if (activity < 0) {
-            /* DRAGON #4 TODO:
-             * - A signal may interrupt select() (errno == EINTR).
-             * - Closing the listening socket may cause errno == EBADF.
-             * - If stop_requested, leave the loop without reporting an
-             *   expected shutdown as an error.
-             * - Otherwise retry on EINTR, or report real errors.
-             * Never use FD_ISSET() when select() has failed.
-             */
-            if (errno == EINTR) {
-                continue;
-            }
-            perror("select");
-            break;
-        }
+if (activity < 0) {
+    if (stop_requested) {
+        break;
+    }
+
+    if (errno == EINTR) {
+        continue;
+    }
+
+    perror("select");
+    break;
+}
+
+if (stop_requested) {
+    break;
+}
         // DRAGON #4 TODO: Check stop_requested again before using read_fds.
 
         // 6. Check if we have a new connection on listening socket
-        if (FD_ISSET(listen_fd, &read_fds)) {
+	if (!stop_requested && FD_ISSET(listen_fd, &read_fds)) {
             addr_len = sizeof(client_addr);
             new_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &addr_len);
             if (new_fd < 0) {
@@ -189,11 +204,15 @@ int main(void)
                     }
                     printf("\n");
                     printf("or like this: %s\n", buffer);
-                    // Dragon #3: Decrypt the received string
-                    // Decryption code here (:
+		// Decrypt each received byte
+		for (ssize_t j = 0; j < bytes_read; j++) {
+    		buffer[j] ^= XOR_KEY;
+		}
 
-                    // Print decrypted data as a string
-                    printf("Decrypted data: %s\n", buffer);
+		// Print the decrypted message
+		printf("Decrypted data: ");
+		fwrite(buffer, 1, bytes_read, stdout);
+		printf("\n");
                 }
             }
         }
